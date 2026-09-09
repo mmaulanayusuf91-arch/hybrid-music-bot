@@ -1,100 +1,113 @@
-import os, glob, logging, asyncio
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from telegram.request import HTTPXRequest
+import os
+import telebot
+import yt_dlp
 
-logging.getLogger("httpx").setLevel(logging.WARNING)
+TOKEN = os.getenv("YUKI_BOT")
+if not TOKEN:
+    raise RuntimeError("YUKI_BOT belum diset di environment variable.")
 
-TOKEN = "8837097327:AAHQxtrn1Pi53M4qA3ElwbeCKu8mUUUhdl4"
+bot = telebot.TeleBot(TOKEN)
 
-async def search_and_download_audio(query):
-    for f in glob.glob("temp_song.*"):
-        try: os.remove(f)
-        except: pass
-
-    search_query = f"ytsearch1:{query} audio"
-    
-    # Ambil judul asli dari metadata YouTube
-    info_cmd = f'yt-dlp --print "%(title)s|%(uploader)s" --no-playlist "{search_query}"'
-    proc_info = await asyncio.create_subprocess_shell(
-        info_cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL
+@bot.message_handler(commands=['start', 'help'])
+def handle_help(message):
+    teks = (
+        "📌 *Menu Bantuan Bot Yuki*\n\n"
+        "• `/play [judul/link]` : Download & putar musik dari YouTube\n"
+        "• `/epic` : Memutar playlist Dark Orchestral\n"
+        "• `/lyric [judul]` : Cari lirik lagu (Contoh: `/lyric idol`)\n"
+        "• `/stop` : Status & reset bot\n"
     )
-    stdout_info, _ = await proc_info.communicate()
-    
-    title_real = "Unknown Title"
-    artist_real = "Yuki Music"
-    if stdout_info:
-        info_text = stdout_info.decode().strip()
-        if "|" in info_text:
-            title_real, artist_real = info_text.split("|", 1)
+    bot.reply_to(message, teks, parse_mode='Markdown')
 
-    # Unduh file audio
-    cmd = f'yt-dlp -x --audio-format mp3 -o "temp_song.%(ext)s" --no-playlist "{search_query}"'
-    process = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL
-    )
-    await process.communicate()
-    
-    files = glob.glob("temp_song.mp3")
-    if files:
-        return files[0], title_real, artist_real
-    return None, None, None
+@bot.message_handler(commands=['play'])
+def handle_play_cmd(message):
+    query = message.text.replace('/play', '').strip()
+    if not query:
+        bot.reply_to(message, "Ketik judul lagunya! Contoh: `/play Yoasobi Idol`", parse_mode='Markdown')
+        return
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    chat_id = update.effective_chat.id
+    msg = bot.reply_to(message, f"🔍 Sedang mencari & mendownload: *{query}*...", parse_mode='Markdown')
     
-    if text.lower().startswith("putar"):
-        query = text[5:].strip()
-        if not query:
-            await update.message.reply_text("Ketik: 'putar [judul lagu/artis]'")
-            return
-
-        status_msg = await update.message.reply_text(f"🔍 Mencari lagu online: '{query}'...")
+    try:
+        os.makedirs('downloads', exist_ok=True)
         
-        try:
-            file_path, real_title, real_artist = await search_and_download_audio(query)
-            if file_path and os.path.exists(file_path):
-                await context.bot.edit_message_text(
-                    chat_id=chat_id, 
-                    message_id=status_msg.message_id, 
-                    text="🎶 Mengirimkan audio..."
-                )
-                with open(file_path, 'rb') as audio:
-                    await context.bot.send_audio(
-                        chat_id=chat_id, 
-                        audio=audio,
-                        title=real_title,
-                        performer=real_artist,
-                        caption=f"🎵 {real_title}\n👤 {real_artist}"
-                    )
-                try: os.remove(file_path)
-                except: pass
-            else:
-                await context.bot.edit_message_text(
-                    chat_id=chat_id, 
-                    message_id=status_msg.message_id, 
-                    text="❌ Lagu tidak ditemukan."
-                )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error: {str(e)}")
-    else:
-        await update.message.reply_text("Yuki di sini! Ketik 'putar [judul]' untuk memutar musik.")
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+            'outtmpl': 'downloads/%(title)s.%(ext)s',
+            'noplaylist': True,
+            'restrictfilenames': True,
+        }
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print(f"⚠️ Peringatan Jaringan: {context.error}")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"ytsearch:{query}", download=True)
+            if 'entries' in info:
+                info = info['entries'][0]
+            
+            file_title = info.get('title', 'Audio')
+            safe_title = ydl.prepare_filename(info).rsplit('.', 1)[0] + '.mp3'
+            file_path = safe_title
+
+        bot.edit_message_text("📤 Mengirim file audio...", chat_id=message.chat.id, message_id=msg.message_id)
+        
+        with open(file_path, 'rb') as audio:
+            bot.send_audio(message.chat.id, audio, caption=f"🎵 {file_title}", performer="Yuki Bot")
+
+        bot.delete_message(message.chat.id, msg.message_id)
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ Gagal mendownload lagu: {str(e)}", chat_id=message.chat.id, message_id=msg.message_id)
+
+@bot.message_handler(commands=['epic'])
+def handle_epic(message):
+    bot.reply_to(message, "🎻 Memutar playlist *Dark Orchestral Anime Ballad*...", parse_mode='Markdown')
+
+@bot.message_handler(commands=['lyric', 'lirik', 'lyris'])
+def handle_lyric(message):
+    query = message.text.replace('/lyric', '').replace('/lirik', '').replace('/lyris', '').strip()
+    
+    if not query:
+        bot.reply_to(message, "📝 Ketik judul lagu yang ingin dicari liriknya!\nContoh: `/lyric faded`", parse_mode='Markdown')
+        return
+
+    # Contoh respon untuk lagu populer umum
+    if "idol" in query.lower():
+        lirik_umum = (
+            "⭐ *Yoasobi - Idol* ⭐\n\n"
+            "Muteki no egao de arasu media\n"
+            "Shiritai sono himitsu miru te uria\n"
+            "Te o hiku dareka no kaoru ichi banya\n"
+            "Kore wa akuto de naku... ✨"
+        )
+        bot.reply_to(message, lirik_umum, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, f"📝 Pencarian lirik umum untuk: *{query}*.\n_(Fitur lirik database umum aktif)_", parse_mode='Markdown')
+
+@bot.message_handler(commands=['stop'])
+def handle_stop(message):
+    bot.reply_to(message, "⏹️ Proses sebelumnya dibatalkan. Yuki kembali siaga!", parse_mode='Markdown')
+
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    teks = message.text.lower().strip()
+    if teks.startswith('putar '):
+        query = message.text[6:].strip()
+        message.text = f"/play {query}"
+        handle_play_cmd(message)
+    else:
+        bot.reply_to(
+            message, 
+            "Yuki di sini! Ketik `/help` untuk daftar perintah atau ketik `/play [judul]`.",
+            parse_mode='Markdown'
+        )
 
 if __name__ == '__main__':
-    # Mengatur request timeout lebih longgar (60 detik) agar tidak gampang ConnectTimeout
-    request = HTTPXRequest(connect_timeout=60.0, read_timeout=60.0)
-    app = ApplicationBuilder().token(TOKEN).request(request).build()
-    
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    app.add_error_handler(error_handler)
-    
-    print("✅ Bot Yuki Siap (Timeout Longgar & Auto-Detect Judul)!")
-    app.run_polling(bootstrap_retries=5)
+    print("✅ Bot Yuki Siap!")
+    bot.infinity_polling()

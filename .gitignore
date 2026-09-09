@@ -4,3 +4,5 @@ temp_wa.mp3
 __pycache__/
 music/*.mp3
 *.mp3
+.env
+*.part
